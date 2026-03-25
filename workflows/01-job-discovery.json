@@ -1,0 +1,338 @@
+{
+  "name": "01 - Job Discovery",
+  "nodes": [
+    {
+      "id": "a1b2c3d4-0001-4000-8000-000000000001",
+      "name": "Schedule Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 */6 * * *"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "a1b2c3d4-0002-4000-8000-000000000002",
+      "name": "Set Keywords",
+      "type": "n8n-nodes-base.set",
+      "typeVersion": 3.2,
+      "position": [470, 300],
+      "parameters": {
+        "mode": "manual",
+        "duplicateItem": false,
+        "assignments": {
+          "assignments": [
+            {
+              "id": "kw-1",
+              "name": "keywords",
+              "value": "[\"Software Engineer\",\"SRE\",\"Backend Developer\",\"Product Analyst\",\"Full Stack Developer\"]",
+              "type": "array"
+            }
+          ]
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "a1b2c3d4-0003-4000-8000-000000000003",
+      "name": "Split Keywords",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [690, 300],
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      }
+    },
+    {
+      "id": "a1b2c3d4-0004-4000-8000-000000000004",
+      "name": "JSearch API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [910, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "https://jsearch.p.rapidapi.com/search",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "query",
+              "value": "={{ $json.keywords[0] }} India"
+            },
+            {
+              "name": "num_pages",
+              "value": "3"
+            },
+            {
+              "name": "date_posted",
+              "value": "week"
+            },
+            {
+              "name": "country",
+              "value": "in"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-RapidAPI-Key",
+              "value": "={{ $env.RAPIDAPI_KEY }}"
+            },
+            {
+              "name": "X-RapidAPI-Host",
+              "value": "jsearch.p.rapidapi.com"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 30000
+        }
+      }
+    },
+    {
+      "id": "a1b2c3d4-0005-4000-8000-000000000005",
+      "name": "Parse Jobs",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1130, 300],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Parse and normalize JSearch API response\nconst response = $input.item.json;\nconst jobs = response.data || [];\n\nconst results = [];\n\nfor (const job of jobs) {\n  // Skip jobs without apply link\n  if (!job.job_apply_link && !job.job_google_link) continue;\n\n  const applyLink = job.job_apply_link || job.job_google_link || '';\n  const companyName = (job.employer_name || '').trim();\n  const roleTitle = (job.job_title || '').trim();\n\n  if (!companyName || !roleTitle) continue;\n\n  // Parse salary info\n  let salaryInfo = '';\n  if (job.job_min_salary && job.job_max_salary) {\n    salaryInfo = `${job.job_salary_currency || 'INR'} ${job.job_min_salary}–${job.job_max_salary} ${job.job_salary_period || ''}`.trim();\n  }\n\n  // Extract required skills from highlights\n  const requiredSkills = [];\n  if (job.job_highlights && job.job_highlights.Qualifications) {\n    requiredSkills.push(...job.job_highlights.Qualifications.slice(0, 10));\n  }\n\n  results.push({\n    company_name: companyName,\n    role_title: roleTitle,\n    job_description: job.job_description || '',\n    required_skills: JSON.stringify(requiredSkills),\n    experience_required: job.job_required_experience\n      ? `${job.job_required_experience.required_experience_in_months || 0} months`\n      : '',\n    apply_link: applyLink,\n    posted_date: job.job_posted_at_datetime_utc || null,\n    source: 'jsearch',\n    location: [job.job_city, job.job_state, job.job_country].filter(Boolean).join(', '),\n    salary_info: salaryInfo\n  });\n}\n\nif (results.length === 0) {\n  // Return empty marker to avoid downstream errors\n  return [{ json: { _empty: true, total: 0 } }];\n}\n\nreturn results.map(j => ({ json: j }));\n"
+      }
+    },
+    {
+      "id": "a1b2c3d4-0006-4000-8000-000000000006",
+      "name": "Filter Empty",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [1350, 300],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "cond-empty",
+              "leftValue": "={{ $json._empty }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "a1b2c3d4-0007-4000-8000-000000000007",
+      "name": "Split Per Job",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [1570, 200],
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      }
+    },
+    {
+      "id": "a1b2c3d4-0008-4000-8000-000000000008",
+      "name": "Check Duplicate",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1790, 200],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT id FROM job_postings WHERE company_name = $1 AND role_title = $2 AND apply_link = $3 LIMIT 1",
+        "additionalFields": {
+          "queryParams": "={{ JSON.stringify([$json.company_name, $json.role_title, $json.apply_link]) }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "pg-credential",
+          "name": "PostgreSQL Job Agent"
+        }
+      }
+    },
+    {
+      "id": "a1b2c3d4-0009-4000-8000-000000000009",
+      "name": "Is New Job?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2010, 200],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "cond-new",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "empty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "a1b2c3d4-0010-4000-8000-000000000010",
+      "name": "Insert Job Posting",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [2230, 100],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO job_postings (company_name, role_title, job_description, required_skills, experience_required, apply_link, posted_date, source, location, salary_info)\nVALUES ($1, $2, $3, $4::jsonb, $5, $6, $7::timestamptz, $8, $9, $10)\nON CONFLICT (company_name, role_title, apply_link) DO NOTHING\nRETURNING id",
+        "additionalFields": {
+          "queryParams": "={{ JSON.stringify([\n  $('Split Per Job').item.json.company_name,\n  $('Split Per Job').item.json.role_title,\n  $('Split Per Job').item.json.job_description,\n  $('Split Per Job').item.json.required_skills,\n  $('Split Per Job').item.json.experience_required,\n  $('Split Per Job').item.json.apply_link,\n  $('Split Per Job').item.json.posted_date,\n  $('Split Per Job').item.json.source,\n  $('Split Per Job').item.json.location,\n  $('Split Per Job').item.json.salary_info\n]) }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "pg-credential",
+          "name": "PostgreSQL Job Agent"
+        }
+      }
+    },
+    {
+      "id": "a1b2c3d4-0011-4000-8000-000000000011",
+      "name": "Trigger JD Processor",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2450, 100],
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $env.WEBHOOK_URL }}/webhook/process-jd",
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "job_id": "={{ $json.id }}"
+        },
+        "options": {
+          "timeout": 60000,
+          "response": {
+            "response": {
+              "neverError": true
+            }
+          }
+        }
+      }
+    },
+    {
+      "id": "a1b2c3d4-0012-4000-8000-000000000012",
+      "name": "Log Discovery",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [2670, 100],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO system_log (workflow, action, data, status) VALUES ($1, $2, $3::jsonb, $4)",
+        "additionalFields": {
+          "queryParams": "={{ JSON.stringify([\n  '01-job-discovery',\n  'job_inserted',\n  JSON.stringify({\n    job_id: $('Insert Job Posting').item.json.id,\n    company: $('Split Per Job').item.json.company_name,\n    role: $('Split Per Job').item.json.role_title\n  }),\n  'success'\n]) }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "pg-credential",
+          "name": "PostgreSQL Job Agent"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Schedule Trigger": {
+      "main": [
+        [{ "node": "Set Keywords", "type": "main", "index": 0 }]
+      ]
+    },
+    "Set Keywords": {
+      "main": [
+        [{ "node": "Split Keywords", "type": "main", "index": 0 }]
+      ]
+    },
+    "Split Keywords": {
+      "main": [
+        [{ "node": "JSearch API", "type": "main", "index": 0 }]
+      ]
+    },
+    "JSearch API": {
+      "main": [
+        [{ "node": "Parse Jobs", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse Jobs": {
+      "main": [
+        [{ "node": "Filter Empty", "type": "main", "index": 0 }]
+      ]
+    },
+    "Filter Empty": {
+      "main": [
+        [{ "node": "Split Per Job", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Split Per Job": {
+      "main": [
+        [{ "node": "Check Duplicate", "type": "main", "index": 0 }]
+      ]
+    },
+    "Check Duplicate": {
+      "main": [
+        [{ "node": "Is New Job?", "type": "main", "index": 0 }]
+      ]
+    },
+    "Is New Job?": {
+      "main": [
+        [{ "node": "Insert Job Posting", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Insert Job Posting": {
+      "main": [
+        [{ "node": "Trigger JD Processor", "type": "main", "index": 0 }]
+      ]
+    },
+    "Trigger JD Processor": {
+      "main": [
+        [{ "node": "Log Discovery", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true,
+    "callerPolicy": "workflowsFromSameOwner",
+    "errorWorkflow": ""
+  },
+  "id": "workflow-01-job-discovery",
+  "tags": [
+    { "id": "tag-job-agent", "name": "job-agent" }
+  ]
+}

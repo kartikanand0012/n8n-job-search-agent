@@ -1,0 +1,340 @@
+{
+  "name": "02 - JD Processor",
+  "nodes": [
+    {
+      "id": "b1b2c3d4-0001-4000-8000-000000000001",
+      "name": "Webhook Trigger",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 300],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "process-jd",
+        "responseMode": "responseNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "b1b2c3d4-0002-4000-8000-000000000002",
+      "name": "Fetch Job Posting",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [470, 300],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT * FROM job_postings WHERE id = $1 LIMIT 1",
+        "additionalFields": {
+          "queryParams": "={{ JSON.stringify([$json.body.job_id]) }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "pg-credential",
+          "name": "PostgreSQL Job Agent"
+        }
+      }
+    },
+    {
+      "id": "b1b2c3d4-0003-4000-8000-000000000003",
+      "name": "Validate Job Exists",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [690, 300],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "cond-exists",
+              "leftValue": "={{ $json.id }}",
+              "rightValue": "",
+              "operator": {
+                "type": "string",
+                "operation": "notEmpty",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "b1b2c3d4-0004-4000-8000-000000000004",
+      "name": "Build OpenAI Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [910, 200],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "const job = $input.item.json;\n\nconst systemPrompt = `You are an expert technical recruiter and JD analyst. Extract structured information from job descriptions and return ONLY valid JSON.\n\nAnalyze the job and return this exact JSON structure:\n{\n  \"core_skills\": [\"list of must-have technical skills\"],\n  \"tools_technologies\": [\"tools, frameworks, platforms mentioned\"],\n  \"responsibilities\": [\"key responsibilities as short bullet strings\"],\n  \"hidden_expectations\": \"inferred expectations not explicitly stated (culture, ownership, pace)\",\n  \"ats_keywords\": [\"important keywords for ATS resume scanning\"],\n  \"simplified_jd\": \"Bullet-format simplified version in plain English. No jargon. Max 10 bullets.\",\n  \"experience_level\": \"junior or mid or senior or lead\",\n  \"role_type\": \"backend or frontend or fullstack or sre or data or product or other\"\n}\n\nRules:\n- Return ONLY the JSON object, no markdown fences, no explanation\n- core_skills: only genuinely required technical skills (max 12)\n- ats_keywords: include exact phrases from the JD (max 20)\n- simplified_jd: use plain English bullets, start each with a verb\n- hidden_expectations: infer from tone, culture signals, stack complexity`;\n\nconst userMessage = `Job Title: ${job.role_title}\\nCompany: ${job.company_name}\\nLocation: ${job.location || 'India'}\\n\\nJob Description:\\n${(job.job_description || '').substring(0, 4000)}`;\n\nreturn [{\n  json: {\n    ...job,\n    _systemPrompt: systemPrompt,\n    _userMessage: userMessage\n  }\n}];\n"
+      }
+    },
+    {
+      "id": "b1b2c3d4-0005-4000-8000-000000000005",
+      "name": "OpenAI Process JD",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1130, 200],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $env.OPENAI_API_KEY }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "model": "gpt-4o-mini",
+          "messages": [
+            {
+              "role": "system",
+              "content": "={{ $json._systemPrompt }}"
+            },
+            {
+              "role": "user",
+              "content": "={{ $json._userMessage }}"
+            }
+          ],
+          "max_tokens": 2000,
+          "temperature": 0.2,
+          "response_format": { "type": "json_object" }
+        },
+        "options": {
+          "timeout": 60000
+        }
+      }
+    },
+    {
+      "id": "b1b2c3d4-0006-4000-8000-000000000006",
+      "name": "Parse & Score Match",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1350, 200],
+      "parameters": {
+        "mode": "runOnceForEachItem",
+        "jsCode": "// Kartik's full skill profile\nconst KARTIK_SKILLS = new Set([\n  'react', 'typescript', 'javascript', 'python', 'django', 'node.js', 'nodejs',\n  'golang', 'go', 'aws', 'postgresql', 'postgres', 'mongodb', 'redis',\n  'kafka', 'docker', 'snowplow', 'kinesis', 'rabbitmq', 'html', 'css',\n  'rest', 'graphql', 'git', 'linux', 'sql', 'nosql', 'microservices',\n  'ci/cd', 'jest', 'pytest', 'celery', 'fastapi', 's3', 'ec2', 'lambda',\n  'cloudwatch', 'nginx', 'flask', 'next.js', 'nextjs', 'tailwind',\n  'kubernetes', 'terraform', 'prometheus', 'grafana', 'elasticsearch'\n]);\n\nconst TRANSFERABLE_MAP = {\n  'vue': 'react',\n  'angular': 'react',\n  'spring': 'django',\n  'java': 'golang',\n  'scala': 'python',\n  'mysql': 'postgresql',\n  'dynamodb': 'mongodb',\n  'sqs': 'kafka',\n  'pubsub': 'kafka',\n  'azure': 'aws',\n  'gcp': 'aws'\n};\n\nconst response = $input.item.json;\nconst jobData = $('Build OpenAI Prompt').item.json;\n\nlet parsed;\ntry {\n  const content = response.choices[0].message.content;\n  parsed = typeof content === 'string' ? JSON.parse(content) : content;\n} catch (e) {\n  parsed = {\n    core_skills: [],\n    tools_technologies: [],\n    responsibilities: [],\n    hidden_expectations: '',\n    ats_keywords: [],\n    simplified_jd: 'Failed to parse JD',\n    experience_level: 'unknown',\n    role_type: 'other'\n  };\n}\n\n// Combine all mentioned skills for matching\nconst allJobSkills = [\n  ...(parsed.core_skills || []),\n  ...(parsed.tools_technologies || [])\n].map(s => s.toLowerCase().trim());\n\n// Calculate match\nconst matched = [];\nconst missing = [];\nconst transferable = [];\n\nfor (const skill of allJobSkills) {\n  const skillKey = skill.replace(/[^a-z0-9.]/g, '');\n  if (KARTIK_SKILLS.has(skill) || KARTIK_SKILLS.has(skillKey)) {\n    matched.push(skill);\n  } else if (TRANSFERABLE_MAP[skillKey]) {\n    transferable.push({ required: skill, has: TRANSFERABLE_MAP[skillKey] });\n  } else {\n    missing.push(skill);\n  }\n}\n\nconst totalSkills = allJobSkills.length || 1;\nconst matchScore = Math.round(\n  ((matched.length + transferable.length * 0.6) / totalSkills) * 100\n);\n\nconst clampedScore = Math.min(100, Math.max(0, matchScore));\n\nreturn [{\n  json: {\n    job_id: jobData.id,\n    company_name: jobData.company_name,\n    role_title: jobData.role_title,\n    apply_link: jobData.apply_link,\n    simplified_jd: parsed.simplified_jd || '',\n    extracted_keywords: JSON.stringify(parsed.ats_keywords || []),\n    core_skills: JSON.stringify(parsed.core_skills || []),\n    tools_technologies: JSON.stringify(parsed.tools_technologies || []),\n    responsibilities: JSON.stringify(parsed.responsibilities || []),\n    hidden_expectations: parsed.hidden_expectations || '',\n    ats_keywords: JSON.stringify(parsed.ats_keywords || []),\n    experience_level: parsed.experience_level || 'unknown',\n    role_type: parsed.role_type || 'other',\n    skill_match_score: clampedScore,\n    match_breakdown: JSON.stringify({\n      matched_skills: matched,\n      missing_skills: missing,\n      transferable_skills: transferable,\n      total_job_skills: totalSkills,\n      score: clampedScore\n    })\n  }\n}];\n"
+      }
+    },
+    {
+      "id": "b1b2c3d4-0007-4000-8000-000000000007",
+      "name": "Insert Processed Job",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1570, 200],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO processed_jobs (job_id, simplified_jd, extracted_keywords, core_skills, tools_technologies, responsibilities, hidden_expectations, ats_keywords, skill_match_score, match_breakdown)\nVALUES ($1, $2, $3::jsonb, $4::jsonb, $5::jsonb, $6::jsonb, $7, $8::jsonb, $9, $10::jsonb)\nON CONFLICT (job_id) DO UPDATE SET\n  simplified_jd = EXCLUDED.simplified_jd,\n  skill_match_score = EXCLUDED.skill_match_score,\n  match_breakdown = EXCLUDED.match_breakdown,\n  processed_at = NOW()\nRETURNING id, skill_match_score",
+        "additionalFields": {
+          "queryParams": "={{ JSON.stringify([\n  $json.job_id,\n  $json.simplified_jd,\n  $json.extracted_keywords,\n  $json.core_skills,\n  $json.tools_technologies,\n  $json.responsibilities,\n  $json.hidden_expectations,\n  $json.ats_keywords,\n  $json.skill_match_score,\n  $json.match_breakdown\n]) }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "pg-credential",
+          "name": "PostgreSQL Job Agent"
+        }
+      }
+    },
+    {
+      "id": "b1b2c3d4-0008-4000-8000-000000000008",
+      "name": "Mark Job Processed",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1790, 200],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "UPDATE job_postings SET is_processed = true WHERE id = $1",
+        "additionalFields": {
+          "queryParams": "={{ JSON.stringify([$('Parse & Score Match').item.json.job_id]) }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "pg-credential",
+          "name": "PostgreSQL Job Agent"
+        }
+      }
+    },
+    {
+      "id": "b1b2c3d4-0009-4000-8000-000000000009",
+      "name": "High Match?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2010, 200],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "loose"
+          },
+          "conditions": [
+            {
+              "id": "cond-match",
+              "leftValue": "={{ $('Parse & Score Match').item.json.skill_match_score }}",
+              "rightValue": 70,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "b1b2c3d4-0010-4000-8000-000000000010",
+      "name": "Telegram High Match",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2230, 100],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "chat_id": "={{ $env.TELEGRAM_CHAT_ID }}",
+          "text": "=🎯 *High Match Job Found!*\n\n*Company:* {{ $('Parse & Score Match').item.json.company_name }}\n*Role:* {{ $('Parse & Score Match').item.json.role_title }}\n*Match Score:* {{ $('Parse & Score Match').item.json.skill_match_score }}%\n\n*Apply:* {{ $('Parse & Score Match').item.json.apply_link }}\n\nTrigger resume optimization:\n`curl -X POST {{ $env.WEBHOOK_URL }}/webhook/optimize-resume -H 'Content-Type: application/json' -d '{\"job_id\": {{ $('Parse & Score Match').item.json.job_id }}}'`",
+          "parse_mode": "Markdown",
+          "disable_web_page_preview": true
+        },
+        "options": {}
+      }
+    },
+    {
+      "id": "b1b2c3d4-0011-4000-8000-000000000011",
+      "name": "Log Processing",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [2450, 200],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO system_log (workflow, action, data, status) VALUES ($1, $2, $3::jsonb, $4)",
+        "additionalFields": {
+          "queryParams": "={{ JSON.stringify([\n  '02-jd-processor',\n  'jd_processed',\n  JSON.stringify({\n    job_id: $('Parse & Score Match').item.json.job_id,\n    company: $('Parse & Score Match').item.json.company_name,\n    role: $('Parse & Score Match').item.json.role_title,\n    score: $('Parse & Score Match').item.json.skill_match_score\n  }),\n  'success'\n]) }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "pg-credential",
+          "name": "PostgreSQL Job Agent"
+        }
+      }
+    },
+    {
+      "id": "b1b2c3d4-0012-4000-8000-000000000012",
+      "name": "Respond Success",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2670, 200],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, job_id: $('Parse & Score Match').item.json.job_id, score: $('Parse & Score Match').item.json.skill_match_score }) }}",
+        "options": {
+          "responseCode": 200
+        }
+      }
+    },
+    {
+      "id": "b1b2c3d4-0013-4000-8000-000000000013",
+      "name": "Respond Not Found",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [910, 420],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "{\"success\": false, \"error\": \"Job not found\"}",
+        "options": {
+          "responseCode": 404
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Webhook Trigger": {
+      "main": [
+        [{ "node": "Fetch Job Posting", "type": "main", "index": 0 }]
+      ]
+    },
+    "Fetch Job Posting": {
+      "main": [
+        [{ "node": "Validate Job Exists", "type": "main", "index": 0 }]
+      ]
+    },
+    "Validate Job Exists": {
+      "main": [
+        [{ "node": "Build OpenAI Prompt", "type": "main", "index": 0 }],
+        [{ "node": "Respond Not Found", "type": "main", "index": 0 }]
+      ]
+    },
+    "Build OpenAI Prompt": {
+      "main": [
+        [{ "node": "OpenAI Process JD", "type": "main", "index": 0 }]
+      ]
+    },
+    "OpenAI Process JD": {
+      "main": [
+        [{ "node": "Parse & Score Match", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse & Score Match": {
+      "main": [
+        [{ "node": "Insert Processed Job", "type": "main", "index": 0 }]
+      ]
+    },
+    "Insert Processed Job": {
+      "main": [
+        [{ "node": "Mark Job Processed", "type": "main", "index": 0 }]
+      ]
+    },
+    "Mark Job Processed": {
+      "main": [
+        [{ "node": "High Match?", "type": "main", "index": 0 }]
+      ]
+    },
+    "High Match?": {
+      "main": [
+        [{ "node": "Telegram High Match", "type": "main", "index": 0 }],
+        [{ "node": "Log Processing", "type": "main", "index": 0 }]
+      ]
+    },
+    "Telegram High Match": {
+      "main": [
+        [{ "node": "Log Processing", "type": "main", "index": 0 }]
+      ]
+    },
+    "Log Processing": {
+      "main": [
+        [{ "node": "Respond Success", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "id": "workflow-02-jd-processor",
+  "tags": [
+    { "id": "tag-job-agent", "name": "job-agent" }
+  ]
+}

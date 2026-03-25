@@ -1,0 +1,243 @@
+{
+  "name": "03 - Resume Optimizer",
+  "nodes": [
+    {
+      "id": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "name": "Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [250, 300],
+      "parameters": {
+        "path": "optimize-resume",
+        "httpMethod": "POST",
+        "responseMode": "responseNode"
+      }
+    },
+    {
+      "id": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+      "name": "Fetch Job Data",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [470, 300],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT jp.id, jp.company_name, jp.role_title, jp.job_description, jp.apply_link, pj.simplified_jd, pj.extracted_keywords, pj.ats_keywords, pj.skill_match_score FROM job_postings jp LEFT JOIN processed_jobs pj ON pj.job_id = jp.id WHERE jp.id = $1",
+        "additionalFields": {
+          "queryParams": "={{ JSON.stringify([$json.body.job_id]) }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "postgres-main",
+          "name": "Job Search DB"
+        }
+      }
+    },
+    {
+      "id": "c3d4e5f6-a7b8-9012-cdef-123456789012",
+      "name": "Read Base Resume",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300],
+      "parameters": {
+        "jsCode": "const fs = require('fs');\nconst resumePath = '/home/ubuntu/resumes/base_resume.txt';\n\nlet baseResume = '';\ntry {\n  baseResume = fs.readFileSync(resumePath, 'utf8');\n} catch (err) {\n  throw new Error(`Failed to read base resume at ${resumePath}: ${err.message}`);\n}\n\nconst jobData = $input.first().json;\n\nreturn [{\n  json: {\n    base_resume: baseResume,\n    job_id: jobData.id,\n    company_name: jobData.company_name,\n    role_title: jobData.role_title,\n    simplified_jd: jobData.simplified_jd || jobData.job_description,\n    ats_keywords: jobData.ats_keywords || [],\n    skill_match_score: jobData.skill_match_score || 0,\n    apply_link: jobData.apply_link || ''\n  }\n}];"
+      }
+    },
+    {
+      "id": "d4e5f6a7-b8c9-0123-defa-234567890123",
+      "name": "OpenAI Resume Optimize",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [910, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $credentials.openaiApi.apiKey }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "model": "gpt-4o",
+          "temperature": 0.3,
+          "response_format": { "type": "json_object" },
+          "messages": [
+            {
+              "role": "system",
+              "content": "You are an expert resume writer specializing in ATS optimization for software engineering roles. You tailor resumes to match specific job descriptions while keeping all content truthful. You output strict JSON only — no markdown, no explanation. Output format: { \"tailored_summary\": \"2-3 sentence professional summary\", \"tailored_skills\": [\"skill1\"], \"tailored_experience\": [{ \"company\": \"Company Name\", \"role\": \"Job Title\", \"duration\": \"Month Year – Month Year\", \"bullets\": [\"• Action verb + task + metric\"] }], \"changes_made\": [\"Changed X to Y because Z\"], \"ats_score_estimate\": 85 }. Rules: NEVER fabricate experience or metrics. ONLY reframe real experience using the JD's language. Use strong action verbs: Built, Architected, Optimized, Led, Reduced, Increased. Mirror JD keywords naturally. Summary must mention the target role and company."
+            },
+            {
+              "role": "user",
+              "content": "=Tailor this resume for the following job.\n\n**Job Title:** {{ $json.role_title }}\n**Company:** {{ $json.company_name }}\n**ATS Keywords:** {{ JSON.stringify($json.ats_keywords) }}\n**Simplified JD:**\n{{ $json.simplified_jd }}\n\n**Base Resume:**\n{{ $json.base_resume }}"
+            }
+          ]
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "openai-api-key",
+          "name": "OpenAI API Key"
+        }
+      }
+    },
+    {
+      "id": "e5f6a7b8-c9d0-1234-efab-345678901234",
+      "name": "Parse & Build Resume",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1130, 300],
+      "parameters": {
+        "jsCode": "const response = $input.first().json;\nconst content = response.choices[0].message.content;\n\nlet parsed;\ntry {\n  parsed = JSON.parse(content);\n} catch (err) {\n  throw new Error(`Failed to parse OpenAI response: ${err.message}\\nContent: ${content}`);\n}\n\n// Get job context from earlier node\nconst readResumeNode = $('Read Base Resume').first().json;\nconst company = readResumeNode.company_name || 'company';\nconst role = readResumeNode.role_title || 'role';\nconst jobId = readResumeNode.job_id;\nconst applyLink = readResumeNode.apply_link;\nconst matchScore = readResumeNode.skill_match_score;\n\n// Sanitize version name\nconst rawName = `resume_${company}_${role}`.toLowerCase();\nconst versionName = rawName.replace(/[^a-z0-9_]/gi, '_').replace(/_+/g, '_').replace(/^_|_$/g, '');\n\n// Build full resume text\nconst skillsList = (parsed.tailored_skills || []).join(', ');\n\nlet experienceText = '';\nif (parsed.tailored_experience && Array.isArray(parsed.tailored_experience)) {\n  experienceText = parsed.tailored_experience.map(exp => {\n    const bullets = (exp.bullets || []).join('\\n');\n    return `## ${exp.role} @ ${exp.company} (${exp.duration})\\n${bullets}`;\n  }).join('\\n\\n');\n}\n\nconst fullResumeText = [\n  `# Kartik Anand`,\n  ``,\n  `## Professional Summary`,\n  parsed.tailored_summary || '',\n  ``,\n  `## Skills`,\n  skillsList,\n  ``,\n  `## Experience`,\n  experienceText,\n  ``,\n  `## Education`,\n  `IIT Bombay — Executive PG Diploma, ML & Data Science (2025–present)`,\n  ``,\n  `---`,\n  `Tailored for: ${role} at ${company}`,\n  `ATS Score Estimate: ${parsed.ats_score_estimate || 'N/A'}%`\n].join('\\n');\n\nreturn [{\n  json: {\n    version_name: versionName,\n    tailored_summary: parsed.tailored_summary || '',\n    tailored_skills: parsed.tailored_skills || [],\n    tailored_experience: parsed.tailored_experience || [],\n    changes_made: parsed.changes_made || [],\n    ats_score_estimate: parsed.ats_score_estimate || 0,\n    full_resume_text: fullResumeText,\n    job_id: jobId,\n    company_name: company,\n    role_title: role,\n    apply_link: applyLink,\n    match_score: matchScore\n  }\n}];"
+      }
+    },
+    {
+      "id": "f6a7b8c9-d0e1-2345-fabc-456789012345",
+      "name": "Save Resume File",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1350, 300],
+      "parameters": {
+        "jsCode": "const fs = require('fs');\nconst path = require('path');\n\nconst data = $input.first().json;\nconst outputDir = '/home/ubuntu/resumes/tailored';\n\n// Ensure directory exists\nif (!fs.existsSync(outputDir)) {\n  fs.mkdirSync(outputDir, { recursive: true });\n}\n\nconst filePath = path.join(outputDir, `${data.version_name}.txt`);\n\ntry {\n  fs.writeFileSync(filePath, data.full_resume_text, 'utf8');\n} catch (err) {\n  throw new Error(`Failed to write resume file: ${err.message}`);\n}\n\nreturn [{\n  json: {\n    ...data,\n    file_path: filePath,\n    saved: true\n  }\n}];"
+      }
+    },
+    {
+      "id": "a7b8c9d0-e1f2-3456-abcd-567890123456",
+      "name": "Store Resume Version",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1570, 300],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO resume_versions (job_id, version_name, tailored_content, changes_made) VALUES ($1, $2, $3, $4) RETURNING id",
+        "additionalFields": {
+          "queryParams": "={{ JSON.stringify([$json.job_id, $json.version_name, $json.full_resume_text, JSON.stringify($json.changes_made)]) }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "postgres-main",
+          "name": "Job Search DB"
+        }
+      }
+    },
+    {
+      "id": "b8c9d0e1-f2a3-4567-bcde-678901234567",
+      "name": "Create Tracker Entry",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1790, 300],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO applications_tracker (job_id, resume_version_id, status) VALUES ($1, $2, 'Not Applied') ON CONFLICT (job_id) DO UPDATE SET resume_version_id = $2, last_updated = NOW() RETURNING id",
+        "additionalFields": {
+          "queryParams": "={{ JSON.stringify([$('Save Resume File').item.json.job_id, $('Store Resume Version').item.json.id]) }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "postgres-main",
+          "name": "Job Search DB"
+        }
+      }
+    },
+    {
+      "id": "c9d0e1f2-a3b4-5678-cdef-789012345678",
+      "name": "Notify Telegram",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2010, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "chat_id": "={{ $env.TELEGRAM_CHAT_ID }}",
+          "text": "=✅ Resume ready: {{ $('Save Resume File').item.json.version_name }}\n📊 Match Score: {{ $('Save Resume File').item.json.match_score }}%\n🏢 Company: {{ $('Save Resume File').item.json.company_name }}\n💼 Role: {{ $('Save Resume File').item.json.role_title }}\n🔗 Apply: {{ $('Save Resume File').item.json.apply_link || 'N/A' }}\n📝 ATS Score Estimate: {{ $('Save Resume File').item.json.ats_score_estimate }}%",
+          "parse_mode": "HTML"
+        }
+      }
+    },
+    {
+      "id": "d0e1f2a3-b4c5-6789-defa-890123456789",
+      "name": "Log Action",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [2230, 300],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO system_log (workflow, action, data, status) VALUES ('resume-optimizer', 'resume_created', $1, 'success')",
+        "additionalFields": {
+          "queryParams": "={{ JSON.stringify([JSON.stringify({ version_name: $('Save Resume File').item.json.version_name, job_id: $('Save Resume File').item.json.job_id, ats_score: $('Save Resume File').item.json.ats_score_estimate })]) }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "postgres-main",
+          "name": "Job Search DB"
+        }
+      }
+    },
+    {
+      "id": "e1f2a3b4-c5d6-7890-efab-901234567890",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2450, 300],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ success: true, version_name: $('Parse & Build Resume').item.json.version_name, resume_id: $('Store Resume Version').item.json.id, ats_score_estimate: $('Parse & Build Resume').item.json.ats_score_estimate }) }}"
+      }
+    }
+  ],
+  "connections": {
+    "Webhook": {
+      "main": [[{ "node": "Fetch Job Data", "type": "main", "index": 0 }]]
+    },
+    "Fetch Job Data": {
+      "main": [[{ "node": "Read Base Resume", "type": "main", "index": 0 }]]
+    },
+    "Read Base Resume": {
+      "main": [[{ "node": "OpenAI Resume Optimize", "type": "main", "index": 0 }]]
+    },
+    "OpenAI Resume Optimize": {
+      "main": [[{ "node": "Parse & Build Resume", "type": "main", "index": 0 }]]
+    },
+    "Parse & Build Resume": {
+      "main": [[{ "node": "Save Resume File", "type": "main", "index": 0 }]]
+    },
+    "Save Resume File": {
+      "main": [[{ "node": "Store Resume Version", "type": "main", "index": 0 }]]
+    },
+    "Store Resume Version": {
+      "main": [[{ "node": "Create Tracker Entry", "type": "main", "index": 0 }]]
+    },
+    "Create Tracker Entry": {
+      "main": [[{ "node": "Notify Telegram", "type": "main", "index": 0 }]]
+    },
+    "Notify Telegram": {
+      "main": [[{ "node": "Log Action", "type": "main", "index": 0 }]]
+    },
+    "Log Action": {
+      "main": [[{ "node": "Respond", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "id": "workflow-03-resume-optimizer",
+  "tags": []
+}

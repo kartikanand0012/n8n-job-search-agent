@@ -1,0 +1,219 @@
+{
+  "name": "05 - Daily Summary",
+  "nodes": [
+    {
+      "id": "11aabbcc-dd11-2233-4455-667788990011",
+      "name": "Daily Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * *"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "22bbccdd-ee22-3344-5566-778899001122",
+      "name": "New Jobs Count",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [470, 300],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COUNT(*) as new_jobs FROM job_postings WHERE scraped_at >= NOW() - INTERVAL '24 hours'"
+      },
+      "credentials": {
+        "postgres": {
+          "id": "postgres-main",
+          "name": "Job Search DB"
+        }
+      }
+    },
+    {
+      "id": "33ccddee-ff33-4455-6677-889900112233",
+      "name": "Applications Count",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [690, 300],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT COUNT(*) as apps_made FROM applications_tracker WHERE applied_at >= NOW() - INTERVAL '24 hours'"
+      },
+      "credentials": {
+        "postgres": {
+          "id": "postgres-main",
+          "name": "Job Search DB"
+        }
+      }
+    },
+    {
+      "id": "44ddeeff-0044-5566-7788-990011223344",
+      "name": "Top Matches",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [910, 300],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT jp.company_name, jp.role_title, jp.apply_link, pj.skill_match_score FROM job_postings jp JOIN processed_jobs pj ON pj.job_id = jp.id LEFT JOIN applications_tracker at ON at.job_id = jp.id WHERE pj.skill_match_score >= 70 AND (at.status IS NULL OR at.status = 'Not Applied') ORDER BY pj.skill_match_score DESC LIMIT 5"
+      },
+      "credentials": {
+        "postgres": {
+          "id": "postgres-main",
+          "name": "Job Search DB"
+        }
+      }
+    },
+    {
+      "id": "55eeff00-1155-6677-8899-001122334455",
+      "name": "App Status Breakdown",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [1130, 300],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "SELECT status, COUNT(*) as count FROM applications_tracker GROUP BY status ORDER BY count DESC"
+      },
+      "credentials": {
+        "postgres": {
+          "id": "postgres-main",
+          "name": "Job Search DB"
+        }
+      }
+    },
+    {
+      "id": "66ff0011-2266-7788-99aa-112233445566",
+      "name": "Compile Summary",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1350, 300],
+      "parameters": {
+        "jsCode": "// Pull results from each upstream node\nconst newJobsData = $('New Jobs Count').first().json;\nconst appsData = $('Applications Count').first().json;\nconst topMatchesData = $('Top Matches').all().map(item => item.json);\nconst statusData = $('App Status Breakdown').all().map(item => item.json);\n\n// Build status breakdown object\nconst statusBreakdown = {};\nstatusData.forEach(row => {\n  statusBreakdown[row.status] = parseInt(row.count, 10);\n});\n\n// Build top matches array\nconst topMatches = topMatchesData.map(row => ({\n  company: row.company_name,\n  role: row.role_title,\n  score: row.skill_match_score,\n  applyLink: row.apply_link\n}));\n\nconst summary = {\n  date: new Date().toISOString().split('T')[0],\n  newJobs: parseInt(newJobsData.new_jobs || 0, 10),\n  appsMade: parseInt(appsData.apps_made || 0, 10),\n  topMatches,\n  statusBreakdown,\n  totalApplications: Object.values(statusBreakdown).reduce((a, b) => a + b, 0)\n};\n\nreturn [{ json: summary }];"
+      }
+    },
+    {
+      "id": "770011aa-3377-8899-bbcc-223344556677",
+      "name": "Format with OpenAI",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1570, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $credentials.openaiApi.apiKey }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "model": "gpt-4o-mini",
+          "temperature": 0.2,
+          "messages": [
+            {
+              "role": "system",
+              "content": "You are Kartik's job search assistant. Format the given JSON data as a crisp daily digest for Telegram. Style: bullet-heavy, no fluff, professional, metrics-driven. No AI filler words. Use emojis sparingly but effectively. Keep it under 400 words. Start with a one-line summary header. Include: new jobs found, applications made today, top job matches (with company + role + score + apply link), and application pipeline breakdown. End with one short actionable tip based on the data."
+            },
+            {
+              "role": "user",
+              "content": "={{ JSON.stringify($json) }}"
+            }
+          ]
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "openai-api-key",
+          "name": "OpenAI API Key"
+        }
+      }
+    },
+    {
+      "id": "8811bbcc-4488-99aa-ccdd-334455667788",
+      "name": "Send Telegram",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1790, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "chat_id": "={{ $env.TELEGRAM_CHAT_ID }}",
+          "text": "={{ $json.choices[0].message.content }}",
+          "parse_mode": "HTML",
+          "disable_web_page_preview": true
+        }
+      }
+    },
+    {
+      "id": "9922ccdd-5599-aabb-ddee-445566778899",
+      "name": "Log Summary",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [2010, 300],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO system_log (workflow, action, data, status) VALUES ('daily-summary', 'digest_sent', $1, 'success')",
+        "additionalFields": {
+          "queryParams": "={{ JSON.stringify([JSON.stringify({ date: $('Compile Summary').item.json.date, newJobs: $('Compile Summary').item.json.newJobs, appsMade: $('Compile Summary').item.json.appsMade })]) }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "postgres-main",
+          "name": "Job Search DB"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily Trigger": {
+      "main": [[{ "node": "New Jobs Count", "type": "main", "index": 0 }]]
+    },
+    "New Jobs Count": {
+      "main": [[{ "node": "Applications Count", "type": "main", "index": 0 }]]
+    },
+    "Applications Count": {
+      "main": [[{ "node": "Top Matches", "type": "main", "index": 0 }]]
+    },
+    "Top Matches": {
+      "main": [[{ "node": "App Status Breakdown", "type": "main", "index": 0 }]]
+    },
+    "App Status Breakdown": {
+      "main": [[{ "node": "Compile Summary", "type": "main", "index": 0 }]]
+    },
+    "Compile Summary": {
+      "main": [[{ "node": "Format with OpenAI", "type": "main", "index": 0 }]]
+    },
+    "Format with OpenAI": {
+      "main": [[{ "node": "Send Telegram", "type": "main", "index": 0 }]]
+    },
+    "Send Telegram": {
+      "main": [[{ "node": "Log Summary", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "id": "workflow-05-daily-summary",
+  "tags": []
+}

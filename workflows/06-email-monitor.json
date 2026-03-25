@@ -1,0 +1,355 @@
+{
+  "name": "06 - Email Monitor",
+  "nodes": [
+    {
+      "id": "aa001122-bb00-1122-cc33-ddeeff001122",
+      "name": "Email Check Trigger",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.1,
+      "position": [250, 300],
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "minutes",
+              "minutesInterval": 30
+            }
+          ]
+        }
+      }
+    },
+    {
+      "id": "bb112233-cc11-2233-dd44-eeff00112233",
+      "name": "Fetch Gmail Messages",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [470, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+        "authentication": "oAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "q",
+              "value": "is:unread newer_than:1h"
+            },
+            {
+              "name": "maxResults",
+              "value": "20"
+            }
+          ]
+        }
+      },
+      "credentials": {
+        "oAuth2Api": {
+          "id": "gmail-oauth2",
+          "name": "Gmail OAuth2"
+        }
+      }
+    },
+    {
+      "id": "cc223344-dd22-3344-ee55-ff0011223344",
+      "name": "Filter Job Emails",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [690, 300],
+      "parameters": {
+        "jsCode": "const data = $input.first().json;\nconst messages = data.messages || [];\n\nif (messages.length === 0) {\n  return [{ json: { jobEmails: [] } }];\n}\n\n// Keywords that indicate job-related emails\nconst jobKeywords = [\n  'interview',\n  'offer',\n  'rejected',\n  'rejection',\n  'shortlisted',\n  'shortlist',\n  'application received',\n  'application confirmation',\n  'screening',\n  'phone screen',\n  'assessment',\n  'coding challenge',\n  'congratulations',\n  'regret',\n  'unfortunately',\n  'we regret',\n  'move forward',\n  'next steps',\n  'hiring',\n  'recruiter'\n];\n\n// Filter messages that have job-related snippets/subjects\n// Note: at this stage we only have message IDs and thread IDs\n// We'll do a preliminary filter on what we have and fetch details next\n// For now, pass all messages through — full filtering happens after fetching details\n// Return message IDs for batch processing\nconst jobEmails = messages.map(msg => ({\n  id: msg.id,\n  threadId: msg.threadId\n}));\n\nreturn [{ json: { jobEmails, totalMessages: messages.length } }];"
+      }
+    },
+    {
+      "id": "dd334455-ee33-4455-ff66-001122334455",
+      "name": "Has Job Emails",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [910, 300],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "has-emails-condition",
+              "leftValue": "={{ $json.jobEmails && $json.jobEmails.length > 0 }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "ee445566-ff44-5566-0077-112233445566",
+      "name": "Split Emails",
+      "type": "n8n-nodes-base.splitInBatches",
+      "typeVersion": 3,
+      "position": [1130, 300],
+      "parameters": {
+        "batchSize": 1,
+        "options": {}
+      }
+    },
+    {
+      "id": "ff556677-0055-6677-1188-223344556677",
+      "name": "Fetch Email Detail",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1350, 300],
+      "parameters": {
+        "method": "GET",
+        "url": "=https://gmail.googleapis.com/gmail/v1/users/me/messages/{{ $json.id }}",
+        "authentication": "oAuth2Api",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "format",
+              "value": "full"
+            }
+          ]
+        }
+      },
+      "credentials": {
+        "oAuth2Api": {
+          "id": "gmail-oauth2",
+          "name": "Gmail OAuth2"
+        }
+      }
+    },
+    {
+      "id": "00667788-1166-7788-2299-334455667788",
+      "name": "Classify Email",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1570, 300],
+      "parameters": {
+        "method": "POST",
+        "url": "https://api.openai.com/v1/chat/completions",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "=Bearer {{ $credentials.openaiApi.apiKey }}"
+            },
+            {
+              "name": "Content-Type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "model": "gpt-4o-mini",
+          "temperature": 0.1,
+          "response_format": { "type": "json_object" },
+          "messages": [
+            {
+              "role": "system",
+              "content": "You are an email classifier for job search tracking. Given an email, extract key information and classify it. Output strict JSON only.\n\nOutput format:\n{\n  \"company\": \"Company Name or null\",\n  \"role\": \"Job Title or null\",\n  \"email_type\": \"interview_invite|rejection|offer|screening|assessment|general\",\n  \"suggested_status\": \"HR Screening|Interview Round 1|Interview Round 2|Technical Round|Offer|Rejected|Applied\",\n  \"action_required\": true,\n  \"action_description\": \"What action Kartik should take, or null if none\",\n  \"key_dates\": \"Any mentioned dates/deadlines or null\",\n  \"summary\": \"One sentence summary of the email\"\n}\n\nIf not job-related, set email_type to 'general' and action_required to false."
+            },
+            {
+              "role": "user",
+              "content": "=Classify this email:\n\nSubject: {{ ($json.payload.headers || []).find(h => h.name === 'Subject')?.value || 'No Subject' }}\nFrom: {{ ($json.payload.headers || []).find(h => h.name === 'From')?.value || 'Unknown' }}\nDate: {{ ($json.payload.headers || []).find(h => h.name === 'Date')?.value || '' }}\nSnippet: {{ $json.snippet || '' }}"
+            }
+          ]
+        }
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "openai-api-key",
+          "name": "OpenAI API Key"
+        }
+      }
+    },
+    {
+      "id": "11778899-2277-8899-33aa-445566778899",
+      "name": "Parse Classification",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1790, 300],
+      "parameters": {
+        "jsCode": "const openAiResponse = $input.first().json;\nconst content = openAiResponse.choices[0].message.content;\n\nlet classification;\ntry {\n  classification = JSON.parse(content);\n} catch (err) {\n  // Fallback if JSON parse fails\n  classification = {\n    company: null,\n    role: null,\n    email_type: 'general',\n    suggested_status: null,\n    action_required: false,\n    action_description: null,\n    key_dates: null,\n    summary: 'Could not parse email classification'\n  };\n}\n\n// Get original email data from Fetch Email Detail node\nconst emailData = $('Fetch Email Detail').first().json;\nconst headers = emailData.payload?.headers || [];\nconst subject = (headers.find(h => h.name === 'Subject')?.value) || 'No Subject';\nconst from = (headers.find(h => h.name === 'From')?.value) || 'Unknown';\nconst snippet = emailData.snippet || '';\n\nreturn [{\n  json: {\n    ...classification,\n    email_id: emailData.id,\n    email_subject: subject,\n    email_from: from,\n    email_snippet: snippet\n  }\n}];"
+      }
+    },
+    {
+      "id": "2288aabb-3388-99bb-44cc-556677889900",
+      "name": "Should Update Status",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2010, 300],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "not-general-condition",
+              "leftValue": "={{ $json.email_type }}",
+              "rightValue": "general",
+              "operator": {
+                "type": "string",
+                "operation": "notEquals"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "3399bbcc-4499-aabb-55dd-667788990011",
+      "name": "Update Application",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2230, 200],
+      "parameters": {
+        "method": "POST",
+        "url": "http://localhost:5678/webhook/update-application",
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "company": "={{ $json.company }}",
+          "role": "={{ $json.role }}",
+          "status": "={{ $json.suggested_status }}",
+          "notes": "=📧 {{ $json.email_type }} from {{ $json.email_from }}: {{ $json.email_snippet.substring(0, 200) }}",
+          "email_id": "={{ $json.email_id }}"
+        }
+      }
+    },
+    {
+      "id": "44aaccdd-55aa-bbcc-66ee-778899001122",
+      "name": "Needs Action",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [2230, 400],
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "action-required-condition",
+              "leftValue": "={{ $json.action_required }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true"
+              }
+            }
+          ],
+          "combinator": "and"
+        }
+      }
+    },
+    {
+      "id": "55bbddee-66bb-ccdd-77ff-889900112233",
+      "name": "Action Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [2450, 400],
+      "parameters": {
+        "method": "POST",
+        "url": "=https://api.telegram.org/bot{{ $env.TELEGRAM_BOT_TOKEN }}/sendMessage",
+        "sendBody": true,
+        "contentType": "json",
+        "body": {
+          "chat_id": "={{ $env.TELEGRAM_CHAT_ID }}",
+          "text": "=🔔 ACTION REQUIRED\n\n📧 {{ $json.email_type.toUpperCase().replace('_', ' ') }}\n🏢 Company: {{ $json.company || 'Unknown' }}\n💼 Role: {{ $json.role || 'Unknown' }}\n\n📝 {{ $json.action_description }}\n{{ $json.key_dates ? '📅 Deadline: ' + $json.key_dates : '' }}\n\n💬 {{ $json.summary }}",
+          "parse_mode": "HTML"
+        }
+      }
+    },
+    {
+      "id": "66cceeff-77cc-ddee-88ff-990011223344",
+      "name": "Log Email Process",
+      "type": "n8n-nodes-base.postgres",
+      "typeVersion": 2.4,
+      "position": [2670, 300],
+      "parameters": {
+        "operation": "executeQuery",
+        "query": "INSERT INTO system_log (workflow, action, data, status) VALUES ('email-monitor', 'email_processed', $1, 'success')",
+        "additionalFields": {
+          "queryParams": "={{ JSON.stringify([JSON.stringify({ email_id: $json.email_id, email_type: $json.email_type, company: $json.company, action_required: $json.action_required })]) }}"
+        }
+      },
+      "credentials": {
+        "postgres": {
+          "id": "postgres-main",
+          "name": "Job Search DB"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Email Check Trigger": {
+      "main": [[{ "node": "Fetch Gmail Messages", "type": "main", "index": 0 }]]
+    },
+    "Fetch Gmail Messages": {
+      "main": [[{ "node": "Filter Job Emails", "type": "main", "index": 0 }]]
+    },
+    "Filter Job Emails": {
+      "main": [[{ "node": "Has Job Emails", "type": "main", "index": 0 }]]
+    },
+    "Has Job Emails": {
+      "main": [
+        [{ "node": "Split Emails", "type": "main", "index": 0 }],
+        []
+      ]
+    },
+    "Split Emails": {
+      "main": [[{ "node": "Fetch Email Detail", "type": "main", "index": 0 }]]
+    },
+    "Fetch Email Detail": {
+      "main": [[{ "node": "Classify Email", "type": "main", "index": 0 }]]
+    },
+    "Classify Email": {
+      "main": [[{ "node": "Parse Classification", "type": "main", "index": 0 }]]
+    },
+    "Parse Classification": {
+      "main": [[{ "node": "Should Update Status", "type": "main", "index": 0 }]]
+    },
+    "Should Update Status": {
+      "main": [
+        [{ "node": "Update Application", "type": "main", "index": 0 }],
+        [{ "node": "Needs Action", "type": "main", "index": 0 }]
+      ]
+    },
+    "Update Application": {
+      "main": [[{ "node": "Needs Action", "type": "main", "index": 0 }]]
+    },
+    "Needs Action": {
+      "main": [
+        [{ "node": "Action Alert", "type": "main", "index": 0 }],
+        [{ "node": "Log Email Process", "type": "main", "index": 0 }]
+      ]
+    },
+    "Action Alert": {
+      "main": [[{ "node": "Log Email Process", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "id": "workflow-06-email-monitor",
+  "tags": []
+}

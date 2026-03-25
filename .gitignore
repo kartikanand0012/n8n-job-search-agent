@@ -1,0 +1,53 @@
+# Environment variables — NEVER commit these, they contain your API keys
+.env
+*.env
+.env.local
+.env.production
+.env.staging
+
+# Resume files — personal data, keep off GitHub
+resumes/
+*.txt.bak
+
+# n8n and PostgreSQL runtime data (created by Docker)
+n8n-data/
+postgres-data/
+.n8n/
+
+# Docker override files
+docker-compose.override.yml
+docker-compose.local.yml
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows
+Thumbs.db
+desktop.ini
+ehthumbs.db
+
+# Linux
+*~
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*.sublime-workspace
+
+# Logs
+*.log
+logs/
+npm-debug.log*
+
+# Node modules (if any scripts added later)
+node_modules/
+package-lock.json
+
+# Backup files
+*.bak
+*.backup
+*.sql.bak
