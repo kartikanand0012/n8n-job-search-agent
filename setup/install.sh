@@ -147,7 +147,7 @@ services:
       - "${N8N_PORT:-5678}:5678"
     volumes:
       - n8n_data:/home/node/.n8n
-      - /home/ubuntu/resumes:/home/ubuntu/resumes
+      - ../resume:/home/node/resumes
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:5678/healthz || exit 1"]
       interval: 30s
@@ -205,13 +205,18 @@ $DC exec -T postgres psql \
 info "Schema applied successfully."
 
 # -----------------------------------------------------------------------------
-# 7. Create resume directories
+# 7. Create resume directories (relative to project root, works on any OS)
 # -----------------------------------------------------------------------------
 info "Creating resume directories..."
-mkdir -p /home/ubuntu/resumes/tailored
-touch /home/ubuntu/resumes/base_resume.txt
-chmod -R 755 /home/ubuntu/resumes
-info "Resume directories created at /home/ubuntu/resumes/"
+mkdir -p "$PROJECT_DIR/resume/tailored"
+# Create placeholder if no resume exists yet
+if [ ! -f "$PROJECT_DIR/resume/base_resume.txt" ]; then
+  touch "$PROJECT_DIR/resume/base_resume.txt"
+  warn "Resume placeholder created at: $PROJECT_DIR/resume/base_resume.txt"
+  warn "Replace it with your actual resume text before running workflows."
+fi
+chmod -R 755 "$PROJECT_DIR/resume"
+info "Resume directories ready at: $PROJECT_DIR/resume/"
 
 # -----------------------------------------------------------------------------
 # 8. Done!
